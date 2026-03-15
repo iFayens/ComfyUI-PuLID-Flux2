@@ -19,11 +19,17 @@ This node is **v0.1 beta**. Here's what works and what doesn't yet:
 | Node loads and runs | ✅ | All 5 nodes functional |
 | InsightFace face detection | ✅ | AntelopeV2 + buffalo_l fallback |
 | EVA-CLIP encoding | ✅ | via open_clip |
-| Face consistency | ⚠️ Partial | Limited by Flux.1 weights on Klein |
-| Image quality with PuLID | ⚠️ Degraded | Single blocks disabled to avoid artifacts |
+| Image quality | ✅ | Good quality output |
+| Green image artifact fixed | ✅ | Auto-cleanup of patches between runs |
+| Face consistency | ⚠️ Partial | Subtle with Flux.1 weights on Klein |
 | Native Klein weights | ❌ Not yet | Training script included — contributions welcome! |
 
-**Bottom line:** PuLID alone with current Flux.1 weights shows subtle results on Klein. For best face consistency right now, Flux.2 Klein's native **Reference Conditioning** (2x ReferenceLatent nodes) is more reliable. PuLID will shine once native Klein weights are trained.
+**Current behavior:**
+- **PuLID only** → Good image quality, subtle face consistency with Flux.1 weights
+- **Reference Conditioning only** → Better image quality + better consistency (Klein's native feature)
+- **PuLID + Reference Conditioning** → Best results — use low weight (0.2-0.3) to avoid conflicts
+
+**Bottom line:** PuLID will show its full potential once native Klein weights are trained. For now, combining PuLID at low weight with Klein's native Reference Conditioning gives the best results.
 
 ---
 
@@ -116,12 +122,13 @@ Just drag & drop it into ComfyUI.
 
 | Parameter | Value | Notes |
 |---|---|---|
-| `weight` | `0.5-0.7` | Keep low with current Flux.1 weights |
+| `weight` | `0.5-0.7` | PuLID only |
+| `weight` | `0.2-0.3` | Combined with Reference Conditioning |
 | `start_at` | `0.0` | Let PuLID guide from the start |
 | `end_at` | `1.0` | Full generation coverage |
 | `face_index` | `0` | Use largest detected face |
 
-> ⚠️ Higher weight values (>0.8) will degrade image quality with non-native weights.
+> ⚠️ Higher weight values (>0.8) may degrade image quality with non-native weights.
 
 ---
 
@@ -183,7 +190,7 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 
 **`AssertionError: 'detection' not in models`**  
 → AntelopeV2 not found. Check the folder structure above (section 3).  
-→ The node will auto-fallback to `buffalo_l` — update to latest version with `git pull`.
+→ Update to latest version with `git pull` for automatic buffalo_l fallback.
 
 **`EVA-CLIP not available`**  
 → Run `pip install open-clip-torch` — do NOT use the eva_clip GitHub package.
@@ -191,8 +198,8 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 **`AttributeError: module 'ml_dtypes' has no attribute 'float4_e2m1fn'`**  
 → Run `pip install ml_dtypes==0.3.2`
 
-**Noisy / green / contaminated output**  
-→ Reduce `weight` to 0.4-0.5. This is a known limitation with Flux.1 weights on Klein.
+**Green / corrupted output after changing weight**  
+→ Fixed in latest version. Update with `git pull` and restart ComfyUI.
 
 **No visible difference with PuLID enabled**  
 → PuLID works across multiple generations — generate 4-5 images with different seeds and compare faces.  
@@ -211,6 +218,7 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 - [x] Training dataset preparation script
 - [x] Training script (Phase 1 — embedding only)
 - [x] Example workflow
+- [x] Fix green image artifact (patch accumulation)
 - [ ] **Native Klein-trained weights** ← main priority
 - [ ] Training script Phase 2 (full pipeline with Flux)
 - [ ] HuggingFace model release
@@ -226,12 +234,6 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 - **Flux.2 Klein**: [Black Forest Labs](https://blackforestlabs.ai)
 - **EVA-CLIP**: [BAAI](https://github.com/baaivision/EVA)
 - **Adaptation for Flux.2 Klein**: [@iFayens](https://github.com/iFayens) — March 2026
-
----
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 

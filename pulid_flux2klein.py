@@ -611,19 +611,21 @@ class ApplyPuLIDFlux2Klein:
         sigma_start = start_at
         sigma_end   = end_at
 
-        # On stocke les infos pour le patch dans model_options
-        if not hasattr(work_model, "_pulid_klein_patches"):
-            work_model._pulid_klein_patches = []
+        # Cleanup: supprimer les anciens patches pour éviter l'accumulation
+        # qui cause l'image verte quand on change le weight entre les runs
+        dm = _get_flux2_inner_model(work_model)
+        if hasattr(dm, "_pulid_klein_unpatchers"):
+            logging.info("[PuLID-Flux2Klein] Cleanup patches précédents...")
+            for old_unpatch in dm._pulid_klein_unpatchers:
+                try:
+                    old_unpatch()
+                except Exception:
+                    pass
+            dm._pulid_klein_unpatchers = []
+        if hasattr(dm, "_pulid_klein_data"):
+            del dm._pulid_klein_data
 
-        work_model._pulid_klein_patches.append({
-            "module"     : pulid_model,
-            "embedding"  : id_tokens,
-            "weight"     : weight,
-            "sigma_start": sigma_start,
-            "sigma_end"  : sigma_end,
-        })
-
-        # Appliquer le patch sur le diffusion_model directement
+        # Appliquer le nouveau patch
         unpatch = patch_flux2klein_forward(
             work_model,
             pulid_model,
@@ -632,10 +634,11 @@ class ApplyPuLIDFlux2Klein:
             sigma_start,
             sigma_end,
         )
-        # Stocker unpatch pour cleanup (si nécessaire)
-        if not hasattr(work_model, "_pulid_klein_unpatchers"):
-            work_model._pulid_klein_unpatchers = []
-        work_model._pulid_klein_unpatchers.append(unpatch)
+
+        # Stocker unpatch pour cleanup au prochain run
+        if not hasattr(dm, "_pulid_klein_unpatchers"):
+            dm._pulid_klein_unpatchers = []
+        dm._pulid_klein_unpatchers.append(unpatch)
 
         logging.info(
             f"[PuLID-Flux2Klein] ✅ PuLID appliqué. "
