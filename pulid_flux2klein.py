@@ -418,21 +418,39 @@ class PuLIDKleinInsightFaceLoader:
             from insightface.app import FaceAnalysis
         except ImportError:
             raise ImportError(
-                "[PuLID-Flux2Klein] insightface non installé. "
-                "Lancez: pip install insightface onnxruntime-gpu"
+                "[PuLID-Flux2Klein] insightface not installed. "
+                "Run: pip install insightface onnxruntime-gpu"
             )
 
-        model = FaceAnalysis(
-            name="antelopev2",
-            root=INSIGHTFACE_DIR,
-            providers=[provider + "ExecutionProvider", "CPUExecutionProvider"],
-        )
-        # Détection progressive si aucun visage
-        for size in [(640, 640), (320, 320), (160, 160)]:
-            model.prepare(ctx_id=0, det_size=size)
-            break
+        providers = [provider + "ExecutionProvider", "CPUExecutionProvider"]
 
-        return (model,)
+        # Try antelopev2 first (best accuracy), fall back to buffalo_l
+        for model_name in ["antelopev2", "buffalo_l"]:
+            try:
+                model = FaceAnalysis(
+                    name=model_name,
+                    root=INSIGHTFACE_DIR,
+                    providers=providers,
+                )
+                model.prepare(ctx_id=0, det_size=(640, 640))
+                if model_name == "buffalo_l":
+                    logging.warning(
+                        "[PuLID-Flux2Klein] AntelopeV2 not found, using buffalo_l as fallback. "
+                        "For best results, install AntelopeV2 from: "
+                        "https://huggingface.co/MonsterMMORPG/InstantID_Models/tree/main/models/antelopev2"
+                    )
+                else:
+                    logging.info("[PuLID-Flux2Klein] InsightFace AntelopeV2 loaded ✅")
+                return (model,)
+            except Exception as e:
+                logging.warning(f"[PuLID-Flux2Klein] Could not load {model_name}: {e}")
+                continue
+
+        raise RuntimeError(
+            "[PuLID-Flux2Klein] Could not load any InsightFace model. "
+            "Please install AntelopeV2 from: "
+            "https://huggingface.co/MonsterMMORPG/InstantID_Models/tree/main/models/antelopev2"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
