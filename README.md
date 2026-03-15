@@ -49,7 +49,7 @@ EVA02-CLIP-L-14-336 downloads automatically on first run via `open_clip` (~800MB
 
 ### 3. Download InsightFace AntelopeV2
 
-Download from: https://huggingface.co/MonsterMMORPG/InsightFace_AntelopeV2
+Download from: [https://huggingface.co/MonsterMMORPG/InsightFace_AntelopeV2](https://huggingface.co/MonsterMMORPG/InstantID_Models/tree/main/models/antelopev2)
 
 Place the **5 files** in the exact folder structure below:
 ```
