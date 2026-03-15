@@ -196,6 +196,7 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 - [ ] Training script Phase 2 (full pipeline with Flux)
 - [ ] HuggingFace model release
 - [ ] Body consistency support (LoRA + PuLID combo)
+- [ ] Edit mode support
 
 ---
 
