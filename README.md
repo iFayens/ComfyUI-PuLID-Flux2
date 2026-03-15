@@ -6,7 +6,24 @@
 [![Flux.2 Klein](https://img.shields.io/badge/Flux.2-Klein%204B%2F9B-green)](https://huggingface.co/black-forest-labs)
 
 > **First PuLID implementation natively adapted for FLUX.2 Klein (4B & 9B)**  
-> Consistent face identity injection without model pollution — March 2026
+> March 2026
+
+---
+
+## ⚠️ Current State & Honest Assessment
+
+This node is **v0.1 beta**. Here's what works and what doesn't yet:
+
+| | Status | Notes |
+|---|---|---|
+| Node loads and runs | ✅ | All 5 nodes functional |
+| InsightFace face detection | ✅ | AntelopeV2 + buffalo_l fallback |
+| EVA-CLIP encoding | ✅ | via open_clip |
+| Face consistency | ⚠️ Partial | Limited by Flux.1 weights on Klein |
+| Image quality with PuLID | ⚠️ Degraded | Single blocks disabled to avoid artifacts |
+| Native Klein weights | ❌ Not yet | Training script included — contributions welcome! |
+
+**Bottom line:** PuLID alone with current Flux.1 weights shows subtle results on Klein. For best face consistency right now, Flux.2 Klein's native **Reference Conditioning** (2x ReferenceLatent nodes) is more reliable. PuLID will shine once native Klein weights are trained.
 
 ---
 
@@ -14,7 +31,7 @@
 
 This custom node brings **PuLID (Pure Identity)** face consistency to **FLUX.2 Klein**, the latest generation model from Black Forest Labs.
 
-Previous PuLID implementations only support Flux.1 Dev. This project is the **first** to adapt PuLID's architecture specifically for Flux.2 Klein's unique transformer structure.
+Previous PuLID implementations only support Flux.1 Dev. This project is the **first** to adapt PuLID's architecture specifically for Flux.2 Klein's unique transformer structure — laying the groundwork for native Klein weights.
 
 ### Key differences vs existing PuLID nodes
 
@@ -32,6 +49,7 @@ Previous PuLID implementations only support Flux.1 Dev. This project is the **fi
 ## 📦 Installation
 
 ### 1. Clone into ComfyUI custom_nodes
+
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/iFayens/ComfyUI-PuLID-Flux2.git ComfyUI-PuLID-Flux2Klein
@@ -49,11 +67,11 @@ cd ComfyUI-PuLID-Flux2Klein
 EVA02-CLIP-L-14-336 downloads automatically on first run via `open_clip` (~800MB).
 
 > ⚠️ **Do NOT** install `eva_clip` from GitHub — that package is broken and not required.  
-> `open-clip-torch` is already included in `requirements.txt`.
+> `open-clip-torch` is already included in the install command above.
 
 ### 3. Download InsightFace AntelopeV2
 
-Download from: [https://huggingface.co/MonsterMMORPG/InsightFace_AntelopeV2](https://huggingface.co/MonsterMMORPG/InstantID_Models/tree/main/models/antelopev2)
+Download from: https://huggingface.co/MonsterMMORPG/InstantID_Models/tree/main/models/antelopev2
 
 Place the **5 files** in the exact folder structure below:
 ```
@@ -65,14 +83,14 @@ ComfyUI/models/insightface/models/antelopev2/
 └── scrfd_10g_bnkps.onnx
 ```
 > ⚠️ The folder must be named exactly `antelopev2` (lowercase).  
-> If missing or misnamed you will get: `AssertionError: 'detection' not in models`
+> If missing: `AssertionError: 'detection' not in models`  
+> The node will automatically fall back to `buffalo_l` if AntelopeV2 is not found.
 
 ### 4. Download PuLID weights
 
 > ⚠️ No weights officially trained on Klein yet. Use Flux.1 weights as a starting point (partial compatibility with Klein 9B).
 
-Download from: https://huggingface.co/guozinan/PuLID  
-File: `pulid_flux_v0.9.1.safetensors`  
+Download: `pulid_flux_v0.9.1.safetensors` from https://huggingface.co/guozinan/PuLID  
 Place in: `ComfyUI/models/pulid/`
 
 ### 5. Download example workflow
@@ -86,7 +104,7 @@ Just drag & drop it into ComfyUI.
 
 | Node | Description |
 |---|---|
-| `Load InsightFace (PuLID Klein)` | Loads AntelopeV2 face detector |
+| `Load InsightFace (PuLID Klein)` | Loads AntelopeV2 face detector (falls back to buffalo_l) |
 | `Load EVA-CLIP (PuLID Klein)` | Loads EVA02-CLIP-L-14-336 visual encoder |
 | `Load PuLID Flux.2 Model` | Loads PuLID weights (.safetensors) |
 | **`Apply PuLID ✦ Flux.2`** | Main node — patches Flux.2 Klein model |
@@ -98,12 +116,12 @@ Just drag & drop it into ComfyUI.
 
 | Parameter | Value | Notes |
 |---|---|---|
-| `weight` | `0.7` | Start here, adjust to taste |
+| `weight` | `0.5-0.7` | Keep low with current Flux.1 weights |
 | `start_at` | `0.0` | Let PuLID guide from the start |
 | `end_at` | `1.0` | Full generation coverage |
 | `face_index` | `0` | Use largest detected face |
 
-> ⚠️ Keep `weight` below 0.8 to avoid image quality degradation with non-native weights.
+> ⚠️ Higher weight values (>0.8) will degrade image quality with non-native weights.
 
 ---
 
@@ -135,17 +153,11 @@ Reference image
               Generated image with consistent identity
 ```
 
-### Klein-specific adaptations
-
-1. **Shared modulation** — Flux.2 Klein shares AdaLayerNorm params across all blocks. PuLID injection acts *after* modulation, independently.
-2. **Fused single blocks** — Klein's `single_transformer_blocks` fuse `attn.to_qkv_mlp_proj`. Injection targets output tokens instead of Q/K/V for stability.
-3. **Conditioning shape** — Qwen3 produces [B, 512, 12288]. PuLID only interacts with the image stream, not the text stream.
-
 ---
 
 ## 🚀 Training Native Klein Weights
 
-This repo includes the **first training script for PuLID on Flux.2 Klein**.
+This is the **main priority** for improving results. The repo includes the first training script for PuLID on Flux.2 Klein.
 
 ```bash
 # Step 1: Prepare dataset
@@ -163,24 +175,31 @@ python training/train_pulid_klein.py \
 
 See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 
+**If you have a powerful GPU (A100, H100) and want to contribute trained weights, please open an issue!**
+
 ---
 
 ## 🐛 Troubleshooting
 
 **`AssertionError: 'detection' not in models`**  
-→ AntelopeV2 not found. Check the folder structure above (section 3).
+→ AntelopeV2 not found. Check the folder structure above (section 3).  
+→ The node will auto-fallback to `buffalo_l` — update to latest version with `git pull`.
 
 **`EVA-CLIP not available`**  
 → Run `pip install open-clip-torch` — do NOT use the eva_clip GitHub package.
 
+**`AttributeError: module 'ml_dtypes' has no attribute 'float4_e2m1fn'`**  
+→ Run `pip install ml_dtypes==0.3.2`
+
+**Noisy / green / contaminated output**  
+→ Reduce `weight` to 0.4-0.5. This is a known limitation with Flux.1 weights on Klein.
+
+**No visible difference with PuLID enabled**  
+→ PuLID works across multiple generations — generate 4-5 images with different seeds and compare faces.  
+→ Check console for: `[PuLID-Flux2Klein] ✅ PuLID applied.`
+
 **`Cannot find double_blocks`**  
-→ Your ComfyUI version may name blocks differently. Open an issue with the exact attribute names.
-
-**Noisy / contaminated output images**  
-→ Reduce `weight` to 0.5–0.6. This happens with non-native Flux.1 weights on Klein.
-
-**Inconsistent results**  
-→ No native Klein weights exist yet. Train using the included script or wait for community weights.
+→ Open an issue with the exact attribute names from your model.
 
 ---
 
@@ -188,15 +207,15 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for full details.
 
 - [x] Custom node for Flux.2 Klein 4B / 9B
 - [x] EVA-CLIP integration via open_clip
-- [x] InsightFace CUDA support
+- [x] InsightFace CUDA support + buffalo_l fallback
 - [x] Training dataset preparation script
 - [x] Training script (Phase 1 — embedding only)
 - [x] Example workflow
-- [ ] Native Klein-trained weights (community training)
+- [ ] **Native Klein-trained weights** ← main priority
 - [ ] Training script Phase 2 (full pipeline with Flux)
 - [ ] HuggingFace model release
+- [ ] Edit mode (img2img) support
 - [ ] Body consistency support (LoRA + PuLID combo)
-- [ ] Edit mode support
 
 ---
 
