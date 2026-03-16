@@ -757,9 +757,9 @@ NODE_CLASS_MAPPINGS = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Version info
 # ──────────────────────────────────────────────────────────────────────────────
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __supported_models__ = ["Flux.2 Klein 4B", "Flux.2 Klein 9B", "Flux.2 Dev 32B"]
-__changelog__ = "v0.2.0: Add Flux.2 Dev 32B support with auto model detection"
+__changelog__ = "v0.2.1: Fix dimension mismatch when switching Flux2 Klein ↔ Dev"
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PuLIDInsightFaceLoader" : "Load InsightFace (PuLID)",
