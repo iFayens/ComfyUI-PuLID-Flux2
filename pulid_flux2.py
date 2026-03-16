@@ -298,149 +298,118 @@ def _detect_flux2_variant(dm) -> tuple:
 
 
 def patch_flux2_forward(flux_model, pulid_module, id_embedding,
-                              weight, sigma_start, sigma_end):
-    """
-    Injecte les embeddings PuLID dans le forward pass de Flux.2.
-    Compatible avec Klein 4B, Klein 9B et Dev 32B.
+                        weight, sigma_start, sigma_end):
 
-    Stratégie :
-      - Pour chaque double_block[i] (i % double_interval == 0) :
-          img_out += weight * PerceiverCA_double[i // double_interval](img_tokens, id_embed)
-      - Pour chaque single_block[i] (i % single_interval == 0) :
-          out += weight * PerceiverCA_single[i // single_interval](img_part, id_embed)
-    """
-
-    # Stocker les données dans le modèle (pattern PuLID original)
+    # récupérer le vrai modèle flux
     dm = _get_flux2_inner_model(flux_model)
 
-    # Détecter automatiquement le variant et la dim
+    # détecter automatiquement le variant
     variant, detected_dim = _detect_flux2_variant(dm)
     logging.info(f"[PuLID-Flux2] Model variant: {variant}, dim: {detected_dim}")
 
-    # Redimensionner les PerceiverCA si la dim détectée est différente
+    # adapter les modules CA si la dimension change
     current_dim = pulid_module.id_former.latents.shape[-1]
-    if current_dim != detected_dim:
-        logging.warning(
-            f"[PuLID-Flux2] PuLID dim ({current_dim}) != model dim ({detected_dim}). "
-            f"Adapting PerceiverCA on-the-fly..."
-        )
+
+    # Sauvegarder les CA originaux si pas encore fait
+    if not hasattr(pulid_module, "_original_pulid_ca_double"):
+        pulid_module._original_pulid_ca_double = pulid_module.pulid_ca_double
+        pulid_module._original_pulid_ca_single = pulid_module.pulid_ca_single
+        pulid_module._original_dim = current_dim
+
+    if detected_dim != getattr(pulid_module, "_current_adapted_dim", current_dim):
         device = pulid_module.id_former.latents.device
         dtype  = pulid_module.id_former.latents.dtype
-        # Recréer les PerceiverCA avec la bonne dim
-        from torch import nn
-        pulid_module.pulid_ca_double = nn.ModuleList([
-            PerceiverAttentionCA(dim=detected_dim).to(device, dtype=dtype)
-            for _ in range(len(pulid_module.pulid_ca_double))
-        ])
-        pulid_module.pulid_ca_single = nn.ModuleList([
-            PerceiverAttentionCA(dim=detected_dim).to(device, dtype=dtype)
-            for _ in range(len(pulid_module.pulid_ca_single))
-        ])
-        logging.info(f"[PuLID-Flux2] PerceiverCA adapted to dim={detected_dim} ✅")
 
+        if detected_dim == pulid_module._original_dim:
+            # Restaurer les CA originaux
+            pulid_module.pulid_ca_double = pulid_module._original_pulid_ca_double
+            pulid_module.pulid_ca_single = pulid_module._original_pulid_ca_single
+            logging.info(f"[PuLID-Flux2] PerceiverCA restored to original dim={detected_dim}")
+        else:
+            # Créer de nouveaux CA pour la dim cible
+            logging.warning(
+                f"[PuLID-Flux2] Adapting PerceiverCA {pulid_module._original_dim} → {detected_dim}"
+            )
+            pulid_module.pulid_ca_double = nn.ModuleList([
+                PerceiverAttentionCA(dim=detected_dim).to(device, dtype=dtype)
+                for _ in range(len(pulid_module._original_pulid_ca_double))
+            ])
+            pulid_module.pulid_ca_single = nn.ModuleList([
+                PerceiverAttentionCA(dim=detected_dim).to(device, dtype=dtype)
+                for _ in range(len(pulid_module._original_pulid_ca_single))
+            ])
+            logging.info(f"[PuLID-Flux2] PerceiverCA adapted to dim={detected_dim} ✅")
+
+        pulid_module._current_adapted_dim = detected_dim
+
+    # stocker données runtime
     dm._pulid_flux2_data = {
-        "module"     : pulid_module,
-        "embedding"  : id_embedding,   # [B, num_tokens, dim]
-        "weight"     : weight,
+        "module": pulid_module,
+        "embedding": id_embedding,
+        "weight": weight,
         "sigma_start": sigma_start,
-        "sigma_end"  : sigma_end,
+        "sigma_end": sigma_end,
     }
 
-    # ── Patch des double_blocks ────────────────────────────────────────────
+    # ─────────────────────────────
+    # patch double blocks
+    # ─────────────────────────────
     original_double_forwards = {}
 
     def make_double_patch(block_idx, ca_idx):
         def patched_forward(img, txt, vec, **kwargs):
+
             data = getattr(dm, "_pulid_flux2_data", None)
+
             out_img, out_txt = original_double_forwards[block_idx](
                 img, txt, vec, **kwargs
             )
+
             if data is None:
                 return out_img, out_txt
 
-            # Vérifier sigma
             sigma = kwargs.get("timestep", None)
             if sigma is not None:
                 s = float(sigma.max())
                 if s < data["sigma_end"] or s > data["sigma_start"]:
                     return out_img, out_txt
 
-            embed  = data["embedding"].to(out_img.device, dtype=out_img.dtype)
+            embed = data["embedding"].to(out_img.device, dtype=out_img.dtype)
             ca_mod = data["module"].pulid_ca_double
+
             if ca_idx < len(ca_mod):
                 correction = ca_mod[ca_idx](out_img, embed)
                 out_img = out_img + data["weight"] * correction
+
             return out_img, out_txt
+
         return patched_forward
 
-    # Récupérer les double_blocks
+    # récupérer blocks flux
     if hasattr(dm, "transformer_blocks"):
         blocks = dm.transformer_blocks
     elif hasattr(dm, "double_blocks"):
         blocks = dm.double_blocks
     else:
         blocks = []
-        logging.warning("[PuLID-Flux2] Impossible de trouver double_blocks!")
 
     double_interval = pulid_module.double_interval
     ca_idx = 0
+
     for i, block in enumerate(blocks):
         if i % double_interval == 0:
             original_double_forwards[i] = block.forward
             block.forward = make_double_patch(i, ca_idx)
             ca_idx += 1
 
-    # ── Patch des single_blocks ────────────────────────────────────────────
-    original_single_forwards = {}
-
-    def make_single_patch(block_idx, ca_idx):
-        def patched_forward(x, vec, **kwargs):
-            data = getattr(dm, "_pulid_flux2_data", None)
-            out = original_single_forwards[block_idx](x, vec, **kwargs)
-            if data is None:
-                return out
-
-            sigma = kwargs.get("timestep", None)
-            if sigma is not None:
-                s = float(sigma.max())
-                if s < data["sigma_end"] or s > data["sigma_start"]:
-                    return out
-
-            # Dans Flux.2 Klein les single_blocks reçoivent img+txt concaténés
-            # On ne corrige que la partie image (premiers N_img tokens)
-            embed  = data["embedding"].to(out.device, dtype=out.dtype)
-            ca_mod = data["module"].pulid_ca_single
-            if ca_idx < len(ca_mod):
-                # Estimation: les tokens images = out.shape[1] - 512 (txt tokens)
-                n_txt = 512
-                n_img = out.shape[1] - n_txt
-                img_part = out[:, :n_img, :]
-                correction = ca_mod[ca_idx](img_part, embed)
-                out = out.clone()
-                out[:, :n_img, :] = img_part + data["weight"] * correction
-            return out
-        return patched_forward
-
-    if hasattr(dm, "single_transformer_blocks"):
-        s_blocks = dm.single_transformer_blocks
-    elif hasattr(dm, "single_blocks"):
-        s_blocks = dm.single_blocks
-    else:
-        s_blocks = []
-        logging.warning("[PuLID-Flux2] Impossible de trouver single_blocks!")
-
-    # Single blocks désactivés pour éviter contamination globale
-    # (poids non entraînés sur Klein → artefacts visuels)
-    # single_interval = pulid_module.single_interval
-    # À réactiver après entraînement des poids natifs Klein
-    pass
-
-    # Retourner une fonction de cleanup
+    # ─────────────────────────────
+    # cleanup / unpatch
+    # ─────────────────────────────
     def unpatch():
+
         for i, fn in original_double_forwards.items():
             blocks[i].forward = fn
-        for i, fn in original_single_forwards.items():
-            s_blocks[i].forward = fn
+
         if hasattr(dm, "_pulid_flux2_data"):
             del dm._pulid_flux2_data
 
@@ -669,8 +638,8 @@ class ApplyPuLIDFlux2:
 
             # ── 4. Patcher le modèle via ComfyUI ModelPatcher ─────────────────
         # Cleanup: supprimer les anciens patches pour éviter l'accumulation
-        # qui cause l'image verte quand on change le weight entre les runs
         dm = _get_flux2_inner_model(work_model)
+
         if hasattr(dm, "_pulid_flux2_unpatchers"):
             logging.info("[PuLID-Flux2] Cleanup patches précédents...")
             for old_unpatch in dm._pulid_flux2_unpatchers:
@@ -679,21 +648,23 @@ class ApplyPuLIDFlux2:
                 except Exception:
                     pass
             dm._pulid_flux2_unpatchers = []
+
         if hasattr(dm, "_pulid_flux2_data"):
             del dm._pulid_flux2_data
 
-        # Détecter la dim du modèle avant le patch
-        dm_pre = _get_flux2_inner_model(work_model)
-        _, detected_dim = _detect_flux2_variant(dm_pre)
+        # Détecter la dim du modèle
+        _, detected_dim = _detect_flux2_variant(dm)
 
         # Projeter les id_tokens vers la dim du modèle si nécessaire
         id_token_dim = id_tokens.shape[-1]
+
         if id_token_dim != detected_dim:
             logging.info(
                 f"[PuLID-Flux2] Projecting id_tokens {id_token_dim} → {detected_dim}"
             )
             proj = nn.Linear(id_token_dim, detected_dim, bias=False).to(device, dtype=dtype)
             torch.nn.init.normal_(proj.weight, std=0.01)
+
             with torch.no_grad():
                 id_tokens = proj(id_tokens)
 
@@ -710,6 +681,7 @@ class ApplyPuLIDFlux2:
         # Stocker unpatch pour cleanup au prochain run
         if not hasattr(dm, "_pulid_flux2_unpatchers"):
             dm._pulid_flux2_unpatchers = []
+
         dm._pulid_flux2_unpatchers.append(unpatch)
 
         dm = _get_flux2_inner_model(work_model)
