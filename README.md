@@ -25,7 +25,7 @@
 | Green image artifact | ✅ Fixed | Auto-cleanup between runs |
 | Native Klein/Dev weights | ❌ Not yet | Training script included |
 
-**Best results:** Use PuLID at low weight (0.2-0.3) combined with Klein's native Reference Conditioning.
+**Best results:** Use `weight: 0.6` with **`end_at: 0.5`** to prevent darkening while maintaining strong identity (see Recommended Parameters section).
 
 ---
 
@@ -117,12 +117,50 @@ Ready-to-use workflow available in the `workflows/` folder — drag & drop into 
 
 ## ⚙️ Recommended Parameters
 
-| Parameter | Klein | Dev |
-|---|---|---|
-| `model_variant` | `auto (recommended)` | `auto (recommended)` |
-| `weight` | `0.5-0.7` | `0.3-0.5` |
-| `start_at` | `0.0` | `0.0` |
-| `end_at` | `1.0` | `1.0` |
+### 🎯 Optimal Settings (Community-Tested)
+
+**The key discovery:** Setting `end_at` to `0.5` instead of `1.0` prevents image darkening while maintaining strong facial identity.
+
+#### Best Configuration for Klein 9B
+
+```
+weight:     0.6
+start_at:   0.0
+end_at:     0.5  ⚠️ Critical — prevents darkening!
+face_index: 0
+```
+
+**Why this works:**
+- **weight: 0.6** → Strong facial identity preservation without being excessive
+- **start_at: 0.0** → PuLID active from the beginning = solid facial structure
+- **end_at: 0.5** → Stops at 50% of diffusion process = natural lighting preserved
+- **face_index: 0** → Uses first detected face
+
+**What happens during generation:**
+- **0-50% (PuLID active):** Facial structure, proportions, and identity are established
+- **50-100% (PuLID inactive):** Natural refinement of lighting, skin texture, and micro-details
+
+### Parameter Comparison Table
+
+| Parameter | Original (has darkening) | **Optimized** | Dev |
+|---|---|---|---|
+| `model_variant` | `auto (recommended)` | `auto (recommended)` | `auto (recommended)` |
+| `weight` | `0.3` | **`0.6`** | `0.5` |
+| `start_at` | `0.0` | `0.0` | `0.0` |
+| `end_at` | `0.8-1.0` ⚠️ | **`0.5`** ✅ | `0.5` |
+
+### Fine-Tuning Guide
+
+If you need to adjust from the base `0.6 / 0.0 / 0.5 / 0`:
+
+| Adjustment | Effect |
+|---|---|
+| `weight: 0.5` | Slightly more creative freedom, less strict identity |
+| `weight: 0.7` | Even stronger identity match (may reduce variety) |
+| `end_at: 0.4` | More subtle identity influence, maximum natural lighting |
+| `end_at: 0.6` | Stronger identity influence, slight risk of darkening |
+
+> ⚠️ **Important:** Values of `end_at` above `0.6` tend to introduce darkening artifacts. Keep it at `0.5` for best results.
 
 ---
 
@@ -168,6 +206,7 @@ See [training/README_TRAINING.md](training/README_TRAINING.md) for details.
 
 | Error | Fix |
 |---|---|
+| **Images are too dark / darkened** | **Set `end_at: 0.5`** instead of 0.8-1.0 (see Recommended Parameters) |
 | `AssertionError: 'detection' not in models` | Install AntelopeV2 (section 3) |
 | `EVA-CLIP not available` | `pip install open-clip-torch` |
 | `ml_dtypes has no attribute 'float4_e2m1fn'` | `pip install ml_dtypes==0.3.2` |

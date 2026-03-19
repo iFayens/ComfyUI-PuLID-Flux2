@@ -1,0 +1,19 @@
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Dossiers de test et output
+training/test_output/
+training/output/
+output/
+
+# Modèles et gros fichiers
+*.safetensors
+*.bin
+*.pt
+*.onnx
+
+# Dataset
+dataset/
+training/dataset/
