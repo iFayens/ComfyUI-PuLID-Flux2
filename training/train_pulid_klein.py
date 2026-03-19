@@ -623,7 +623,8 @@ class PuLIDKleinTrainer:
             avg_loss = epoch_loss / len(self.dataloader)
             log.info(f"Epoch {epoch} — loss moyenne : {avg_loss:.4f}")
 
-            self.save_checkpoint(epoch, global_step, avg_loss)
+            # Checkpoints intermédiaires désactivés (économise le disk)
+            # self.save_checkpoint(epoch, global_step, avg_loss)
 
             if avg_loss < best_loss:
                 best_loss = avg_loss
