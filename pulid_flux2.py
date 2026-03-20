@@ -456,41 +456,36 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
     original_single_forwards = {}
 
     def make_single_patch(block_idx, ca_idx):
-        def patched_forward(hidden_states, temb, **kwargs):
-
+        def patched_forward(x, vec, pe, **kwargs):
+            # ⬆️ Enlevez temb des args positionnels, mettez tout dans **kwargs
+            
             data = getattr(dm, "_pulid_flux2_data", None)
-
-            out = original_single_forwards[block_idx](
-                hidden_states, temb, **kwargs
-            )
-
+            
+            # Forward original avec kwargs intacts
+            out = original_single_forwards[block_idx](x, vec, pe, **kwargs)
+            
             if data is None:
                 return out
-
             if _sigma_out_of_range(kwargs.get("timestep", None), data):
                 return out
-
-            # out peut être un tuple (hidden_states, residual) selon l'implémentation
+                
+            # Injection PuLID
             if isinstance(out, tuple):
                 out_hidden = out[0]
                 embed = data["embedding"].to(out_hidden.device, dtype=out_hidden.dtype)
                 ca_mod = data["module"].pulid_ca_single
-
                 if ca_idx < len(ca_mod):
                     correction = ca_mod[ca_idx](out_hidden, embed)
                     out_hidden = out_hidden + data["weight"] * correction
-
                 return (out_hidden,) + out[1:]
             else:
                 embed = data["embedding"].to(out.device, dtype=out.dtype)
                 ca_mod = data["module"].pulid_ca_single
-
                 if ca_idx < len(ca_mod):
                     correction = ca_mod[ca_idx](out, embed)
                     out = out + data["weight"] * correction
-
                 return out
-
+        
         return patched_forward
 
     # récupérer single blocks
