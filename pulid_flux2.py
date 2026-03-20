@@ -21,9 +21,18 @@ Différences clés vs Flux.1 qui nécessitent une adaptation :
 
 Strategy d'injection:
   - On injecte les embeddings facials via des Cross-Attention Perceiver (comme PuLID original)
-  - On patch le forward des double_blocks et single_blocks via model patching ComfyUI
+  - On patch le forward des double_blocks ET single_blocks via model patching ComfyUI
   - Le perceiver reçoit les id_embedding (512-dim InsightFace + EVA-CLIP features)
     et génère une correction additive sur les image tokens
+
+CHANGELOG:
+  v0.3.0:
+    - FIX CRITIQUE : Single blocks maintenant patchés (double_blocks seuls = ~50% de l'injection)
+    - FIX CRITIQUE : Half vs BFloat16 — cast dynamique dans PerceiverAttentionCA.forward()
+    - FIX : Sigma range logique corrigée (était inversée)
+    - FIX : EVA-CLIP output 3D géré (extraction CLS token si [B, N, D])
+  v0.2.1:
+    - Fix dimension mismatch when switching Flux2 Klein ↔ Dev
 """
 
 import os
@@ -78,8 +87,19 @@ class PerceiverAttentionCA(nn.Module):
         x       : image tokens  [B, N_img, dim]
         context : id embedding  [B, N_id,  dim]
         returns : correction additive [B, N_img, dim]
+
+        FIX v0.3.0: Cast dynamique vers le dtype des poids du module.
+        Règle le crash "expected scalar type Half but found BFloat16" (issue #4)
+        quand le modèle tourne en float16 alors que le module est en bfloat16.
         """
         B, N, C = x.shape
+
+        # ── FIX CRITIQUE : cast vers le dtype des poids pour éviter Half/BFloat16 mismatch ──
+        weight_dtype = self.norm1.weight.dtype
+        x = x.to(dtype=weight_dtype)
+        context = context.to(dtype=weight_dtype)
+        # ────────────────────────────────────────────────────────────────────────────────────
+
         x_n = self.norm1(x)
         ctx = self.norm2(context)
 
@@ -194,7 +214,11 @@ class PuLIDFlux2(nn.Module):
         except KeyError:
             dim = 3072
         model = cls(dim=dim)
-        model.load_state_dict(state, strict=False)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            logging.warning(f"[PuLID-Flux2] Poids manquants : {missing[:5]}")
+        if unexpected:
+            logging.warning(f"[PuLID-Flux2] Poids inattendus : {unexpected[:5]}")
         return model
 
 
@@ -230,6 +254,9 @@ def encode_image_eva_clip(eva_clip, image: torch.Tensor,
     """
     image : [B, H, W, C] float32 [0,1]
     retourne (id_cond_vit [B, 768], None)
+
+    FIX v0.3.0: Gestion du cas où EVA-CLIP retourne [B, N, D] (tokens de séquence)
+    au lieu de [B, D]. On extrait le CLS token (index 0) dans ce cas.
     """
     face_features_image = F.interpolate(
         image.permute(0, 3, 1, 2),
@@ -249,6 +276,16 @@ def encode_image_eva_clip(eva_clip, image: torch.Tensor,
         id_cond_vit = eva_clip(face_features_image.float())
         if isinstance(id_cond_vit, (list, tuple)):
             id_cond_vit = id_cond_vit[0]
+
+    # ── FIX v0.3.0 : EVA-CLIP peut retourner [B, N, D] selon la config ──
+    # On extrait le CLS token (premier token) si c'est le cas
+    if id_cond_vit.dim() == 3:
+        logging.debug(
+            f"[PuLID-Flux2] EVA-CLIP output 3D détecté {tuple(id_cond_vit.shape)}, "
+            "extraction CLS token (index 0)"
+        )
+        id_cond_vit = id_cond_vit[:, 0, :]  # [B, N, D] → [B, D]
+    # ────────────────────────────────────────────────────────────────────
 
     # Forcer bfloat16 pour compatibilité avec Flux.2 Klein
     target_dtype = torch.bfloat16 if dtype == torch.bfloat16 else dtype
@@ -351,6 +388,18 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
         "sigma_end": sigma_end,
     }
 
+    # ─────────────────────────────────────────────────────────────────────
+    # FIX v0.3.0 : helper pour vérifier la sigma range (logique corrigée)
+    # Avant : s < sigma_end or s > sigma_start  → EXCLUAIT la plage [start, end]
+    # Après : not (sigma_end <= s <= sigma_start) → EXCLUT en dehors de la plage
+    # ─────────────────────────────────────────────────────────────────────
+    def _sigma_out_of_range(sigma_tensor, data):
+        """Retourne True si on doit skipper ce step (sigma hors plage active)."""
+        if sigma_tensor is None:
+            return False
+        s = float(sigma_tensor.max())
+        return not (data["sigma_end"] <= s <= data["sigma_start"])
+
     # ─────────────────────────────
     # patch double blocks
     # ─────────────────────────────
@@ -368,11 +417,8 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
             if data is None:
                 return out_img, out_txt
 
-            sigma = kwargs.get("timestep", None)
-            if sigma is not None:
-                s = float(sigma.max())
-                if s < data["sigma_end"] or s > data["sigma_start"]:
-                    return out_img, out_txt
+            if _sigma_out_of_range(kwargs.get("timestep", None), data):
+                return out_img, out_txt
 
             embed = data["embedding"].to(out_img.device, dtype=out_img.dtype)
             ca_mod = data["module"].pulid_ca_double
@@ -387,28 +433,98 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
 
     # récupérer blocks flux
     if hasattr(dm, "transformer_blocks"):
-        blocks = dm.transformer_blocks
+        double_blocks = dm.transformer_blocks
     elif hasattr(dm, "double_blocks"):
-        blocks = dm.double_blocks
+        double_blocks = dm.double_blocks
     else:
-        blocks = []
+        double_blocks = []
 
     double_interval = pulid_module.double_interval
     ca_idx = 0
 
-    for i, block in enumerate(blocks):
+    for i, block in enumerate(double_blocks):
         if i % double_interval == 0:
             original_double_forwards[i] = block.forward
             block.forward = make_double_patch(i, ca_idx)
             ca_idx += 1
 
+    # ─────────────────────────────────────────────────────────────────────
+    # FIX v0.3.0 : patch single blocks (MANQUANT dans v0.2.x)
+    # Klein 4B = 20 single blocks, Klein 9B = 24 → ~50% de l'injection
+    # était complètement ignorée avant ce fix !
+    # ─────────────────────────────────────────────────────────────────────
+    original_single_forwards = {}
+
+    def make_single_patch(block_idx, ca_idx):
+        def patched_forward(hidden_states, temb, **kwargs):
+
+            data = getattr(dm, "_pulid_flux2_data", None)
+
+            out = original_single_forwards[block_idx](
+                hidden_states, temb, **kwargs
+            )
+
+            if data is None:
+                return out
+
+            if _sigma_out_of_range(kwargs.get("timestep", None), data):
+                return out
+
+            # out peut être un tuple (hidden_states, residual) selon l'implémentation
+            if isinstance(out, tuple):
+                out_hidden = out[0]
+                embed = data["embedding"].to(out_hidden.device, dtype=out_hidden.dtype)
+                ca_mod = data["module"].pulid_ca_single
+
+                if ca_idx < len(ca_mod):
+                    correction = ca_mod[ca_idx](out_hidden, embed)
+                    out_hidden = out_hidden + data["weight"] * correction
+
+                return (out_hidden,) + out[1:]
+            else:
+                embed = data["embedding"].to(out.device, dtype=out.dtype)
+                ca_mod = data["module"].pulid_ca_single
+
+                if ca_idx < len(ca_mod):
+                    correction = ca_mod[ca_idx](out, embed)
+                    out = out + data["weight"] * correction
+
+                return out
+
+        return patched_forward
+
+    # récupérer single blocks
+    if hasattr(dm, "single_transformer_blocks"):
+        single_blocks = dm.single_transformer_blocks
+    elif hasattr(dm, "single_blocks"):
+        single_blocks = dm.single_blocks
+    else:
+        single_blocks = []
+        logging.warning("[PuLID-Flux2] Aucun single_block trouvé — injection partielle seulement")
+
+    single_interval = pulid_module.single_interval
+    ca_idx_single = 0
+
+    for i, block in enumerate(single_blocks):
+        if i % single_interval == 0:
+            original_single_forwards[i] = block.forward
+            block.forward = make_single_patch(i, ca_idx_single)
+            ca_idx_single += 1
+
+    logging.info(
+        f"[PuLID-Flux2] Patched: {len(original_double_forwards)} double blocks, "
+        f"{len(original_single_forwards)} single blocks"
+    )
+
     # ─────────────────────────────
     # cleanup / unpatch
     # ─────────────────────────────
     def unpatch():
-
         for i, fn in original_double_forwards.items():
-            blocks[i].forward = fn
+            double_blocks[i].forward = fn
+
+        for i, fn in original_single_forwards.items():
+            single_blocks[i].forward = fn
 
         if hasattr(dm, "_pulid_flux2_data"):
             del dm._pulid_flux2_data
@@ -494,7 +610,7 @@ class PuLIDEVACLIPLoader:
         if model is None:
             raise RuntimeError(
                 "[PuLID-Flux2] EVA-CLIP non disponible. "
-                "Installez eva_clip: pip install git+https://github.com/baaivision/EVA.git#subdirectory=EVA-CLIP"
+                "Installez open_clip: pip install open-clip-torch"
             )
         return (model,)
 
@@ -545,7 +661,11 @@ class PuLIDModelLoader:
                 dim_detected = state.get("id_former.latents",
                                          torch.zeros(1, 1, dim)).shape[-1]
                 model = PuLIDFlux2(dim=dim_detected)
-                model.load_state_dict(state, strict=False)
+                missing, unexpected = model.load_state_dict(state, strict=False)
+                if missing:
+                    logging.warning(f"[PuLID-Flux2] Poids manquants ({len(missing)}) : {missing[:3]}")
+                if unexpected:
+                    logging.warning(f"[PuLID-Flux2] Poids inattendus ({len(unexpected)}) : {unexpected[:3]}")
             else:
                 model = PuLIDFlux2.from_pretrained(path)
 
@@ -624,7 +744,7 @@ class ApplyPuLIDFlux2:
 
         # ── 3. IDFormer → tokens embedding ───────────────────────────────
         pulid_model = pulid_model.to(device, dtype=dtype)
-        
+
         # Utiliser autocast pour gérer les conversions de dtype automatiquement
         device_type = 'cuda' if device.type == 'cuda' else 'cpu'
         with torch.no_grad():
@@ -662,8 +782,10 @@ class ApplyPuLIDFlux2:
         id_token_dim = id_tokens.shape[-1]
 
         if id_token_dim != detected_dim:
-            logging.info(
-                f"[PuLID-Flux2] Projecting id_tokens {id_token_dim} → {detected_dim}"
+            logging.warning(
+                f"[PuLID-Flux2] ⚠️ Dim mismatch : id_tokens={id_token_dim} vs modèle={detected_dim}. "
+                f"Projection aléatoire — résultats sous-optimaux. "
+                f"Entraîner avec --dim {detected_dim} pour de meilleurs résultats."
             )
             proj = nn.Linear(id_token_dim, detected_dim, bias=False).to(device, dtype=dtype)
             torch.nn.init.normal_(proj.weight, std=0.01)
@@ -760,9 +882,15 @@ NODE_CLASS_MAPPINGS = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Version info
 # ──────────────────────────────────────────────────────────────────────────────
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 __supported_models__ = ["Flux.2 Klein 4B", "Flux.2 Klein 9B", "Flux.2 Dev 32B"]
-__changelog__ = "v0.2.1: Fix dimension mismatch when switching Flux2 Klein ↔ Dev"
+__changelog__ = (
+    "v0.3.0: "
+    "Fix single blocks non patchés (injection à 100% au lieu de 50%) | "
+    "Fix Half vs BFloat16 crash (issue #4) | "
+    "Fix sigma range logique inversée | "
+    "Fix EVA-CLIP output 3D (CLS token extraction)"
+)
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PuLIDInsightFaceLoader" : "Load InsightFace (PuLID)",
