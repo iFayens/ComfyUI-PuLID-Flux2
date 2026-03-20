@@ -456,13 +456,12 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
     original_single_forwards = {}
 
     def make_single_patch(block_idx, ca_idx):
-        def patched_forward(x, vec, pe, **kwargs):
-            # ⬆️ Enlevez temb des args positionnels, mettez tout dans **kwargs
-            
+        def patched_forward(x, vec, pe, *args, **kwargs):
+            # *args capture temb (Klein) ou rien (Dev)
             data = getattr(dm, "_pulid_flux2_data", None)
             
-            # Forward original avec kwargs intacts
-            out = original_single_forwards[block_idx](x, vec, pe, **kwargs)
+            # Forward original avec args/kwargs
+            out = original_single_forwards[block_idx](x, vec, pe, *args, **kwargs)
             
             if data is None:
                 return out
