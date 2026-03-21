@@ -115,6 +115,14 @@ ComfyUI/models/pulid/
 
 ---
 
+## ⚠️ Training
+
+Training scripts have been temporarily removed due to instability and bugs.
+They will be reintroduced in a future update once fully stable and reliable.
+Thanks for your patience.
+
+---
+
 ## 🔌 Available Nodes
 
 * Load InsightFace (PuLID)
