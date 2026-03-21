@@ -31,8 +31,9 @@ First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B) and Dev (
 2. Add **Apply PuLID ✦ Flux.2** node
 3. Use recommended settings:
 
-   * `weight = 0.6`
-   * `end_at = 0.5`
+   * `weight = 0.8`
+   * `start_at = 0.7`
+   * `end_at = 0.2`
 4. Generate
 
 Done ✅
@@ -50,7 +51,7 @@ Done ✅
 | Fine details       | 1.0       | 0.4      | 0.0    |
 
 💡 **Best overall:**
-`weight = 0.6` + `end_at = 0.5` → strong identity without darkening
+`weight = 0.8` + `start_at = 0.7` `end_at = 0.2` → strong identity without darkening
 
 ---
 
