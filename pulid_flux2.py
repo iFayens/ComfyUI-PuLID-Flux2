@@ -158,7 +158,11 @@ class IDFormer(nn.Module):
         returns    : [B, num_tokens, dim]
         """
         B = id_embed.shape[0]
-        combined = torch.cat([id_embed, clip_embed], dim=-1)  # [B, 1280]
+        # réduire influence couleur CLIP
+        clip_embed = clip_embed - clip_embed.mean(dim=-1, keepdim=True)
+        clip_embed = 0.3 * clip_embed
+
+        combined = torch.cat([id_embed, clip_embed], dim=-1)
         tokens = self.proj(combined).view(B, self.num_tokens, -1)  # [B, T, dim]
 
         latents = self.latents.expand(B, -1, -1)
@@ -180,8 +184,8 @@ class PuLIDFlux2(nn.Module):
       - pulid_ca_single: PerceiverCA injectés dans les single_blocks
     """
     def __init__(self, dim: int = 3072,
-                 double_interval: int = 2,
-                 single_interval: int = 4):
+                 double_interval: int = 3,
+                 single_interval: int = 6):
         super().__init__()
         self.double_interval = double_interval
         self.single_interval  = single_interval
@@ -387,18 +391,51 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
         "sigma_start": sigma_start,
         "sigma_end": sigma_end,
     }
+    
+    # Variable pour stocker le sigma courant
+    current_sigma = [None]  # utiliser une liste pour permettre la modification dans les closures
 
     # ─────────────────────────────────────────────────────────────────────
     # FIX v0.3.0 : helper pour vérifier la sigma range (logique corrigée)
     # Avant : s < sigma_end or s > sigma_start  → EXCLUAIT la plage [start, end]
     # Après : not (sigma_end <= s <= sigma_start) → EXCLUT en dehors de la plage
     # ─────────────────────────────────────────────────────────────────────
-    def _sigma_out_of_range(sigma_tensor, data):
+    def _sigma_out_of_range(data):
         """Retourne True si on doit skipper ce step (sigma hors plage active)."""
-        if sigma_tensor is None:
+        if current_sigma[0] is None:
             return False
-        s = float(sigma_tensor.max())
-        return not (data["sigma_end"] <= s <= data["sigma_start"])
+        
+        s = float(current_sigma[0])
+        # Flux.2 Klein utilise déjà des sigmas normalisés [0, 1], pas besoin de diviser par 15
+        s_norm = s
+        
+        # Log pour debug
+        in_range = data["sigma_end"] <= s_norm <= data["sigma_start"]
+        
+        return not in_range
+        
+        return not (data["sigma_end"] <= s_norm <= data["sigma_start"])
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Wrapper pour capturer le sigma depuis le model_sampling
+        # ─────────────────────────────────────────────────────────────────────
+        original_model_function = None
+
+        def capture_sigma_wrapper(original_func):
+            def wrapper(x, timestep, *args, **kwargs):
+                # Capturer le sigma/timestep actuel
+                if timestep is not None:
+                    if isinstance(timestep, torch.Tensor):
+                        current_sigma[0] = float(timestep.max().item())
+                    else:
+                        current_sigma[0] = float(timestep)
+                return original_func(x, timestep, *args, **kwargs)
+            return wrapper
+
+        # Patcher le apply_model du diffusion_model
+        if hasattr(dm, 'forward'):
+            original_model_function = dm.forward
+            dm.forward = capture_sigma_wrapper(original_model_function)
 
     # ─────────────────────────────
     # patch double blocks
@@ -410,6 +447,9 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
 
             data = getattr(dm, "_pulid_flux2_data", None)
 
+            if 'timestep' in kwargs:
+                logging.info(f"[PuLID-DEBUG] Timestep found: {kwargs['timestep']}")
+
             out_img, out_txt = original_double_forwards[block_idx](
                 img, txt, vec, **kwargs
             )
@@ -417,7 +457,15 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
             if data is None:
                 return out_img, out_txt
 
-            if _sigma_out_of_range(kwargs.get("timestep", None), data):
+            # Extraire sigma depuis transformer_options
+            if 'transformer_options' in kwargs and 'sigmas' in kwargs['transformer_options']:
+                sig = kwargs['transformer_options']['sigmas']
+                if sig is not None:
+                    current_sigma[0] = float(sig[0]) if hasattr(sig, '__getitem__') else float(sig)
+            elif 'timestep' in kwargs:
+                current_sigma[0] = float(kwargs['timestep'].max()) if hasattr(kwargs['timestep'], 'max') else float(kwargs['timestep'])
+
+            if _sigma_out_of_range(data):
                 return out_img, out_txt
 
             embed = data["embedding"].to(out_img.device, dtype=out_img.dtype)
@@ -425,7 +473,14 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
 
             if ca_idx < len(ca_mod):
                 correction = ca_mod[ca_idx](out_img, embed)
-                out_img = out_img + data["weight"] * correction
+
+                # 🔥 FIX MAJEUR : stabilisation
+                correction = correction / (correction.norm(dim=-1, keepdim=True) + 1e-6)
+
+                # scaling doux
+                alpha = data["weight"] * 0.3
+
+                out_img = out_img + alpha * correction
 
             return out_img, out_txt
 
@@ -459,13 +514,22 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
         def patched_forward(x, vec, pe, *args, **kwargs):
             # *args capture temb (Klein) ou rien (Dev)
             data = getattr(dm, "_pulid_flux2_data", None)
+            logging.debug(f"[PuLID] kwargs keys: {kwargs.keys()}, vec type: {type(vec)}")
             
             # Forward original avec args/kwargs
             out = original_single_forwards[block_idx](x, vec, pe, *args, **kwargs)
             
             if data is None:
                 return out
-            if _sigma_out_of_range(kwargs.get("timestep", None), data):
+                # Extraire sigma depuis transformer_options (ComfyUI stocke le timestep là)
+                if 'transformer_options' in kwargs and 'sigmas' in kwargs['transformer_options']:
+                    sigmas = kwargs['transformer_options']['sigmas']
+                    if sigmas is not None and len(sigmas) > 0:
+                        current_sigma[0] = float(sigmas[0]) if isinstance(sigmas, (list, tuple)) else float(sigmas.max())
+                elif 'timestep' in kwargs:
+                    current_sigma[0] = float(kwargs['timestep'].max()) if hasattr(kwargs['timestep'], 'max') else float(kwargs['timestep'])
+                
+            if _sigma_out_of_range(data):
                 return out
                 
             # Injection PuLID
@@ -475,7 +539,9 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
                 ca_mod = data["module"].pulid_ca_single
                 if ca_idx < len(ca_mod):
                     correction = ca_mod[ca_idx](out_hidden, embed)
-                    out_hidden = out_hidden + data["weight"] * correction
+                    correction = correction / (correction.norm(dim=-1, keepdim=True) + 1e-6)
+                    alpha = data["weight"] * 0.3
+                    out_hidden = out_hidden + alpha * correction
                 return (out_hidden,) + out[1:]
             else:
                 embed = data["embedding"].to(out.device, dtype=out.dtype)
@@ -519,6 +585,10 @@ def patch_flux2_forward(flux_model, pulid_module, id_embedding,
 
         for i, fn in original_single_forwards.items():
             single_blocks[i].forward = fn
+            
+        # Restaurer le forward original si on l'a patché
+        if original_model_function is not None:
+            dm.forward = original_model_function
 
         if hasattr(dm, "_pulid_flux2_data"):
             del dm._pulid_flux2_data
@@ -744,6 +814,9 @@ class ApplyPuLIDFlux2:
         with torch.no_grad():
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=(device_type=='cuda')):
                 id_tokens = pulid_model.id_former(id_embed_raw, clip_embed)
+
+                # 🔥 stabilisation globale
+                id_tokens = id_tokens / (id_tokens.norm(dim=-1, keepdim=True) + 1e-6)
             # id_tokens: [1, num_tokens, dim]
 
         # ── 4. Patcher le modèle via ComfyUI ModelPatcher ─────────────────
@@ -876,7 +949,7 @@ NODE_CLASS_MAPPINGS = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Version info
 # ──────────────────────────────────────────────────────────────────────────────
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __supported_models__ = ["Flux.2 Klein 4B", "Flux.2 Klein 9B", "Flux.2 Dev 32B"]
 __changelog__ = (
     "v0.3.0: "
