@@ -22,7 +22,7 @@ First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B) and Dev (
 
 ## 🖼️ Results
 
-> Add your BEST before / after images here (very important for impact)
+> ///
 
 ---
 
@@ -177,6 +177,6 @@ If this project helps you, consider giving it a ⭐ on GitHub — it really help
 
 You can also support future development:
 
-👉 https://buymeacoffee.com/TONNAME
+👉 https://buymeacoffee.com/fayens
 
 Thank you 🙏
