@@ -3,6 +3,7 @@
 🔥 Bring consistent identity to FLUX.2 in one node  
 
 > 🚀 **v0.4.0 — safetensors support + native Klein weights** + improvements
+👉 [Download on HuggingFace](https://huggingface.co/Fayens/Pulid-Flux2)
 
 First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B) and Dev (32B)
 
@@ -170,4 +171,12 @@ Thanks for your patience.
 
 ---
 
-⭐ If this project helps you, consider starring the repo!
+## ⭐ Support
+
+If this project helps you, consider giving it a ⭐ on GitHub — it really helps.
+
+You can also support future development:
+
+👉 https://buymeacoffee.com/TONNAME
+
+Thank you 🙏
