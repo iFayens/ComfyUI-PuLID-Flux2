@@ -2,21 +2,19 @@
 
 🔥 Bring consistent identity to FLUX.2 in one node  
 
-> 🚀 **v0.4.0 — safetensors support + native Klein weights** + improvements
-👉 [Download on HuggingFace](https://huggingface.co/Fayens/Pulid-Flux2)
+> 🚀 **v0.5.0 — improvements**
+👉 https://huggingface.co/dx8152/Flux2-Klein-9B-Consistency
 
 First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B) and Dev (32B)
 
 ---
 
-## 🚀 What's new (V2)
+## 🚀 What's new (v0.5.0)
 
-* ✅ Native Klein weights (trained)
-* ✅ Safetensors support (plug & play)
-* ✅ Full injection (double + single blocks → 100% identity)
 * ✅ Improved face recognition
 * ✅ Less artifacts
-* ✅ Fixed sigma control (`start_at` / `end_at` now fully working)
+* ✅ Adapted PuLID-Flux2 to Flux2-Klein-9B-Consistency Model
+* ⚠️ Sigma control (`start_at` / `end_at` NOT fully working)
 
 ---
 
@@ -32,27 +30,12 @@ First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B) and Dev (
 2. Add **Apply PuLID ✦ Flux.2** node
 3. Use recommended settings:
 
-   * `weight = 0.8`
-   * `start_at = 0.7`
-   * `end_at = 0.2`
+   * `weight = 1`
+   * `start_at = 0`
+   * `end_at = 1`
 4. Generate
 
 Done ✅
-
----
-
-## 🎛️ Recommended Settings
-
-| 🎯 Goal            | ⚖️ Weight | ▶️ Start | ⏹️ End |
-| ------------------ | --------- | -------- | ------ |
-| Portrait fidelity  | 1.0 – 2.0 | 1.0      | 0.0    |
-| Style + face       | 0.5 – 1.0 | 0.7      | 0.3    |
-| Subtle inspiration | 0.3 – 0.5 | 1.0      | 0.0    |
-| Structure only     | 1.5       | 1.0      | 0.6    |
-| Fine details       | 1.0       | 0.4      | 0.0    |
-
-💡 **Best overall:**
-`weight = 0.8` + `start_at = 0.7` `end_at = 0.2` → strong identity without darkening
 
 ---
 
@@ -82,7 +65,7 @@ pip install insightface onnxruntime-gpu open-clip-torch safetensors ml_dtypes==0
 
 ### 📥 Download weights
 
-👉 https://huggingface.co/Fayens/Pulid-Flux2
+👉 https://huggingface.co/dx8152/Flux2-Klein-9B-Consistency
 
 Place in:
 ComfyUI/models/pulid/
@@ -167,6 +150,7 @@ Thanks for your patience.
 * PuLID original: https://github.com/ToTheBeginning/PuLID
 * Flux.2: Black Forest Labs
 * EVA-CLIP: BAAI
+* Weight: dx8152 
 * Adaptation: @iFayens
 
 ---
