@@ -1,6 +1,6 @@
 """
 ComfyUI-PuLID-Flux2
-Custom node PuLID for FLUX.2 — Klein 4B, Klein 9B, Dev 32B
+Custom node PuLID for FLUX.2 — Version simplifiée
 """
 
 import os
@@ -138,7 +138,7 @@ def load_eva_clip(device):
         return None
 
 
-def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
+def patch_flux(model, pulid_module, id_tokens, strength):
     dm = get_flux_inner(model)
     
     double_blocks = getattr(dm, "transformer_blocks", None) or getattr(dm, "double_blocks", [])
@@ -146,22 +146,15 @@ def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
     
     original_double = {}
     original_single = {}
-    current_sigma = [0.0]
     
     for idx, block in enumerate(double_blocks):
         original_double[idx] = block.forward
         
         def make_double_patch(block_idx, ca_idx):
             def patched(img, txt, vec, **kwargs):
-                if 'timestep' in kwargs:
-                    t = kwargs['timestep']
-                    if isinstance(t, torch.Tensor):
-                        current_sigma[0] = float(t.max().item())
-                
                 out_img, out_txt = original_double[block_idx](img, txt, vec, **kwargs)
                 
-                sigma = current_sigma[0]
-                if start_sigma <= sigma <= end_sigma and ca_idx < len(pulid_module.double_ca):
+                if ca_idx < len(pulid_module.double_ca):
                     if block_idx < 3:
                         factor = 8.0
                     elif block_idx < 5:
@@ -172,7 +165,7 @@ def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
                     ca = pulid_module.double_ca[ca_idx]
                     correction = ca(out_img, id_tokens)
                     correction = correction / (correction.norm(dim=-1, keepdim=True) + 1e-6)
-                    out_img = out_img + weight * factor * correction
+                    out_img = out_img + strength * factor * correction
                 
                 return out_img, out_txt
             return patched
@@ -185,11 +178,6 @@ def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
         
         def make_single_patch(block_idx, ca_idx):
             def patched(x, vec, pe, *args, **kwargs):
-                if 'timestep' in kwargs:
-                    t = kwargs['timestep']
-                    if isinstance(t, torch.Tensor):
-                        current_sigma[0] = float(t.max().item())
-                
                 try:
                     if len(args) > 0:
                         out = original_single[block_idx](x, vec, pe, args[0], **kwargs)
@@ -198,8 +186,7 @@ def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
                 except:
                     out = original_single[block_idx](x, vec, pe, **kwargs)
                 
-                sigma = current_sigma[0]
-                if start_sigma <= sigma <= end_sigma and ca_idx < len(pulid_module.single_ca):
+                if ca_idx < len(pulid_module.single_ca):
                     if block_idx < 4:
                         factor = 6.0
                     elif block_idx < 8:
@@ -215,7 +202,7 @@ def patch_flux(model, pulid_module, id_tokens, weight, start_sigma, end_sigma):
                     ca = pulid_module.single_ca[ca_idx]
                     correction = ca(hidden, id_tokens)
                     correction = correction / (correction.norm(dim=-1, keepdim=True) + 1e-6)
-                    hidden = hidden + weight * factor * correction
+                    hidden = hidden + strength * factor * correction
                     
                     if isinstance(out, tuple):
                         out = (hidden,) + out[1:]
@@ -331,13 +318,11 @@ class ApplyPuLIDFlux2:
         return {
             "required": {
                 "model": ("MODEL",),
-                #"pulid_model": ("PULID_MODEL",),
+                "pulid_model": ("PULID_MODEL",),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "eva_clip": ("EVA_CLIP",),
                 "face_analysis": ("INSIGHTFACE",),
                 "image": ("IMAGE",),
-                "weight": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "start_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "end_sigma": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
             "optional": {"face_index": ("INT", {"default": 0, "min": 0, "max": 9})}
         }
@@ -346,7 +331,7 @@ class ApplyPuLIDFlux2:
     FUNCTION = "apply"
     CATEGORY = "PuLID-Flux2"
     
-    def apply(self, model, pulid_model, eva_clip, face_analysis, image, weight, start_sigma, end_sigma, face_index=0):
+    def apply(self, model, pulid_model, strength, eva_clip, face_analysis, image, face_index=0):
         device = comfy.model_management.get_torch_device()
         dtype = torch.bfloat16
         
@@ -408,13 +393,13 @@ class ApplyPuLIDFlux2:
             nn.init.normal_(proj.weight, std=0.01)
             id_tokens = proj(id_tokens)
         
-        unpatch = patch_flux(work_model, pulid_model, id_tokens, weight, start_sigma, end_sigma)
+        unpatch = patch_flux(work_model, pulid_model, id_tokens, strength)
         dm._pulid_unpatcher = unpatch
         
-        if weight == 0:
+        if strength == 0:
             print("⚪ PuLID: OFF")
         else:
-            print(f"🟢 PuLID: ON | {variant} | weight={weight} | face={face_index}/{len(faces)-1}")
+            print(f"🟢 PuLID: ON | {variant} | strength={strength:.2f} | face={face_index}/{len(faces)-1}")
         
         return (work_model,)
 
