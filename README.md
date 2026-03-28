@@ -5,8 +5,8 @@
 > 🚀 **v0.6.1 — improvements**
 👉 https://huggingface.co/Fayens/Pulid-Flux2
 
-First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B)
-⚠️ Not working on Dev32 yet – issue identified, fix in progress.
+* First working PuLID adaptation for Flux.2 — supports Klein (4B / 9B)
+* ⚠️ Not working on Dev32 yet – issue identified, fix in progress.
 
 ---
 
