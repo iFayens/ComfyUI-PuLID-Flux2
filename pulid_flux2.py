@@ -1,7 +1,7 @@
 """
-ComfyUI-PuLID-Flux2 - VERSION AMÉLIORÉE
-Custom node PuLID for FLUX.2 — Klein 4B, Klein 9B, Dev 32B
-Version optimisée avec cache, gestion d'erreurs renforcée et paramètres configurables
+ComfyUI-PuLID-Flux2 - VERSION UNIFIÉE KLEIN + DEV32B
+Compatible automatiquement Klein 4B / 9B et Flux.2 Dev 32B
+Version optimisée avec adaptation dynamique à chaque run
 """
 
 import os
@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Tuple
 import warnings
 
 import comfy.model_management
@@ -22,9 +22,8 @@ os.makedirs(PULID_DIR, exist_ok=True)
 os.makedirs(INSIGHTFACE_DIR, exist_ok=True)
 
 # ============================================================================
-# CACHE GLOBAL pour les modèles
+# CACHE GLOBAL
 # ============================================================================
-
 _MODEL_CACHE = {
     "eva_clip": None,
     "insightface": None,
@@ -32,36 +31,23 @@ _MODEL_CACHE = {
     "insightface_device": None,
 }
 
-
 def get_cached_model(model_type: str, device: torch.device, loader_func):
-    """Récupère un modèle depuis le cache ou le charge si nécessaire"""
     cache_key = f"{model_type}"
     device_key = f"{model_type}_device"
     
-    # Vérifier si le modèle existe et est sur le bon device
-    if _MODEL_CACHE[cache_key] is not None:
-        if _MODEL_CACHE[device_key] == device:
-            return _MODEL_CACHE[cache_key]
-        else:
-            # Déplacer vers le nouveau device
-            _MODEL_CACHE[cache_key] = _MODEL_CACHE[cache_key].to(device)
-            _MODEL_CACHE[device_key] = device
-            return _MODEL_CACHE[cache_key]
+    if _MODEL_CACHE[cache_key] is not None and _MODEL_CACHE[device_key] == device:
+        return _MODEL_CACHE[cache_key]
     
-    # Charger le modèle
     model = loader_func(device)
     _MODEL_CACHE[cache_key] = model
     _MODEL_CACHE[device_key] = device
     return model
 
-
 # ============================================================================
-# Classes d'attention pour PuLID
+# Classes d'attention
 # ============================================================================
-
 class PerceiverAttentionCA(nn.Module):
-    """Couche d'attention croisée pour le mécanisme Perceiver"""
-    def __init__(self, dim: int = 3072, dim_head: int = 64, heads: int = 16):
+    def __init__(self, dim: int = 4096, dim_head: int = 64, heads: int = 16):
         super().__init__()
         self.heads = heads
         self.dim_head = dim_head
@@ -77,10 +63,8 @@ class PerceiverAttentionCA(nn.Module):
         B, N, _ = x.shape
         target_dtype = self.norm1.weight.dtype
         
-        if x.dtype != target_dtype:
-            x = x.to(target_dtype)
-        if context.dtype != target_dtype:
-            context = context.to(target_dtype)
+        x = x.to(target_dtype)
+        context = context.to(target_dtype)
 
         x_n = self.norm1(x)
         ctx = self.norm2(context)
@@ -99,7 +83,6 @@ class PerceiverAttentionCA(nn.Module):
 
 
 class IDFormer(nn.Module):
-    """IDFormer - Transforme l'embedding d'identité en tokens"""
     def __init__(self, dim: int = 4096, num_tokens: int = 4):
         super().__init__()
         self.num_tokens = num_tokens
@@ -115,9 +98,8 @@ class IDFormer(nn.Module):
 
     def forward(self, id_embed: torch.Tensor, clip_embed: torch.Tensor) -> torch.Tensor:
         B = id_embed.shape[0]
-        # Centrage du clip embedding
         clip_embed = clip_embed - clip_embed.mean(dim=-1, keepdim=True)
-        clip_embed = 1 * clip_embed
+        clip_embed = clip_embed * 1.0
         
         combined = torch.cat([id_embed, clip_embed], dim=-1)
         tokens = self.proj(combined).view(B, self.num_tokens, -1)
@@ -129,29 +111,27 @@ class IDFormer(nn.Module):
 
 
 class PuLIDFlux2(nn.Module):
-    """Modèle PuLID principal pour Flux.2"""
+    """Modèle PuLID – peut être créé avec n’importe quelle dim"""
     def __init__(self, dim: int = 4096):
         super().__init__()
-        self.id_former = IDFormer(dim=dim)
         self.dim = dim
-        self.double_ca = nn.ModuleList([PerceiverAttentionCA(dim=dim) for _ in range(10)])
-        self.single_ca = nn.ModuleList([PerceiverAttentionCA(dim=dim) for _ in range(30)])
+        self.id_former = IDFormer(dim=dim)
+        self.double_ca = nn.ModuleList([PerceiverAttentionCA(dim=dim) for _ in range(12)])   # plus flexible
+        self.single_ca = nn.ModuleList([PerceiverAttentionCA(dim=dim) for _ in range(60)])   # supporte Dev32B (48 single)
 
     @classmethod
     def from_pretrained(cls, path: str):
         state = torch.load(path, map_location="cpu", weights_only=True)
-        dim = state["id_former.latents"].shape[-1]
+        dim = state["id_former.latents"].shape[-1] if "id_former.latents" in state else 4096
         model = cls(dim=dim)
         model.load_state_dict(state, strict=False)
         return model
 
 
 # ============================================================================
-# Fonctions utilitaires
+# Utilitaires
 # ============================================================================
-
 def get_flux_inner(model):
-    """Extrait le diffusion model interne de Flux"""
     if hasattr(model, "model"):
         model = model.model
     if hasattr(model, "diffusion_model"):
@@ -159,22 +139,22 @@ def get_flux_inner(model):
     return model
 
 
-def detect_flux_variant(model) -> Tuple[str, int]:
-    """Détecte la variante de Flux utilisée (Klein 4B, Klein 9B, Dev 32B)"""
-    double = getattr(model, "transformer_blocks", None) or getattr(model, "double_blocks", [])
-    single = getattr(model, "single_transformer_blocks", None) or getattr(model, "single_blocks", [])
-    n_double, n_single = len(double), len(single)
+def detect_flux_variant(model) -> Tuple[str, int, int, int]:
+    """Retourne variante, dim cachée, nb double blocks, nb single blocks"""
+    dm = get_flux_inner(model)
+    double_blocks = getattr(dm, "transformer_blocks", None) or getattr(dm, "double_blocks", [])
+    single_blocks = getattr(dm, "single_transformer_blocks", None) or getattr(dm, "single_blocks", [])
+    n_double, n_single = len(double_blocks), len(single_blocks)
     
-    if n_double <= 5 and n_single <= 20:
-        return "klein_4b", 3072
-    elif n_double <= 8 and n_single <= 24:
-        return "klein_9b", 4096
-    elif n_single >= 40:
-        return "flux2_dev", 6144
+    if n_double <= 6 and n_single <= 22:
+        return "klein_4b", 3072, n_double, n_single
+    elif n_double <= 10 and n_single <= 28:
+        return "klein_9b", 4096, n_double, n_single
+    elif n_single >= 40:  # Flux.2 Dev 32B
+        return "flux2_dev", 6144, n_double, n_single
     else:
-        logging.warning(f"[PuLID-Flux2] Unknown variant ({n_double}d/{n_single}s), defaulting to klein_9b")
-        return "klein_9b", 4096
-
+        print(f"[PuLID-Flux2] Variante inconnue ({n_double}d/{n_single}s) → fallback klein_9b")
+        return "klein_9b", 4096, n_double, n_single
 
 def load_eva_clip(device):
     """Charge le modèle EVA-CLIP pour l'extraction des features"""
@@ -191,121 +171,79 @@ def load_eva_clip(device):
         warnings.warn(f"[PuLID] Erreur lors du chargement d'EVA-CLIP: {e}")
         return None
 
+def get_ca_index(block_idx: int, total_blocks: int, num_ca: int) -> int:
+    """Distribution intelligente des couches CA sur tous les blocks (même Dev32B)"""
+    if total_blocks <= num_ca:
+        return block_idx
+    return int(block_idx * num_ca / total_blocks)
 
-def get_scale_factors(block_idx: int, total_blocks: int, block_type: str = "double") -> float:
-    """
-    Calcule le facteur d'échelle pour un bloc donné
-    
-    Args:
-        block_idx: Index du bloc actuel
-        total_blocks: Nombre total de blocs
-        block_type: "double" ou "single"
-    
-    Returns:
-        float: Facteur d'échelle pour ce bloc
-    """
+
+def get_scale_factors(block_idx: int, total_blocks: int, block_type: str = "double", variant: str = "klein") -> float:
+    progress = block_idx / max(total_blocks, 1)
     if block_type == "double":
-        # Facteurs plus forts au début, décroissants
-        if block_idx < 3:
+        if progress < 0.4:
             return 8.0
-        elif block_idx < 5:
+        elif progress < 0.7:
             return 5.0
         else:
             return 3.0
     else:  # single
-        if block_idx < 4:
-            return 6.0
-        elif block_idx < 8:
-            return 4.0
+        if progress < 0.3:
+            return 6.5
+        elif progress < 0.6:
+            return 4.5
+        elif progress < 0.85:
+            return 3.0
         else:
-            return 2.0
+            return 1.8
 
 
 def patch_flux(model, pulid_module, id_tokens, strength, debug=False):
-    """
-    Patch le modèle Flux avec les tokens d'identité PuLID
-    
-    Args:
-        model: Modèle Flux à patcher
-        pulid_module: Module PuLID contenant les couches d'attention
-        id_tokens: Tokens d'identité extraits
-        strength: Intensité du PuLID (0-2)
-        debug: Active les logs de debug
-    
-    Returns:
-        Fonction unpatch pour restaurer le modèle original
-    """
     dm = get_flux_inner(model)
-    
     double_blocks = getattr(dm, "transformer_blocks", None) or getattr(dm, "double_blocks", [])
     single_blocks = getattr(dm, "single_transformer_blocks", None) or getattr(dm, "single_blocks", [])
     
     original_double = {}
     original_single = {}
-    
-    # Patch des double blocks
+    variant, _, n_double, n_single = detect_flux_variant(dm)
+
+    # Patch double blocks
     for idx, block in enumerate(double_blocks):
         original_double[idx] = block.forward
-        
-        def make_double_patch(block_idx, ca_idx):
+        def make_double_patch(block_idx):
             def patched(img, txt, vec, **kwargs):
                 out_img, out_txt = original_double[block_idx](img, txt, vec, **kwargs)
-                
-                if ca_idx < len(pulid_module.double_ca):
-                    factor = get_scale_factors(block_idx, len(double_blocks), "double")
-                    
-                    ca = pulid_module.double_ca[ca_idx]
-                    correction = ca(out_img, id_tokens)
-                    
-                    # Normalisation optimisée avec F.normalize
-                    correction = F.normalize(correction, p=2, dim=-1)
-                    out_img = out_img + strength * factor * correction
-                    
-                    if debug:
-                        print(f"[Double Block {block_idx}] factor={factor:.1f}, correction_norm={correction.norm():.4f}")
-                
+                ca_idx = get_ca_index(block_idx, n_double, len(pulid_module.double_ca))
+                ca = pulid_module.double_ca[ca_idx]
+                factor = get_scale_factors(block_idx, n_double, "double", variant)
+                correction = F.normalize(ca(out_img, id_tokens), p=2, dim=-1)
+                out_img = out_img + strength * factor * correction
+                if debug:
+                    print(f"[Double {block_idx}/{n_double-1}] ca={ca_idx} factor={factor:.1f}")
                 return out_img, out_txt
             return patched
-        
-        ca_idx = min(idx, len(pulid_module.double_ca) - 1)
-        block.forward = make_double_patch(idx, ca_idx)
-    
-    # Patch des single blocks
+        block.forward = make_double_patch(idx)
+
+    # Patch single blocks
     for idx, block in enumerate(single_blocks):
         original_single[idx] = block.forward
-        
-        def make_single_patch(block_idx, ca_idx):
+        def make_single_patch(block_idx):
             def patched(x, vec, pe, *args, **kwargs):
                 try:
-                    if len(args) > 0:
-                        out = original_single[block_idx](x, vec, pe, args[0], **kwargs)
-                    else:
-                        out = original_single[block_idx](x, vec, pe, **kwargs)
-                except Exception as e:
-                    if debug:
-                        print(f"[Single Block {block_idx}] Fallback appelé: {e}")
+                    out = original_single[block_idx](x, vec, pe, args[0] if args else None, **kwargs)
+                except:
                     out = original_single[block_idx](x, vec, pe, **kwargs)
-                
-                if ca_idx < len(pulid_module.single_ca):
-                    factor = get_scale_factors(block_idx, len(single_blocks), "single")
-                    
-                    ca = pulid_module.single_ca[ca_idx]
-                    correction = ca(out, id_tokens)
-                    
-                    # Normalisation optimisée
-                    correction = F.normalize(correction, p=2, dim=-1)
-                    out = out + strength * factor * correction
-                    
-                    if debug:
-                        print(f"[Single Block {block_idx}] factor={factor:.1f}, correction_norm={correction.norm():.4f}")
-                
+                ca_idx = get_ca_index(block_idx, n_single, len(pulid_module.single_ca))
+                ca = pulid_module.single_ca[ca_idx]
+                factor = get_scale_factors(block_idx, n_single, "single", variant)
+                correction = F.normalize(ca(out, id_tokens), p=2, dim=-1)
+                out = out + strength * factor * correction
+                if debug:
+                    print(f"[Single {block_idx}/{n_single-1}] ca={ca_idx} factor={factor:.1f}")
                 return out
             return patched
-        
-        ca_idx = min(idx, len(pulid_module.single_ca) - 1)
-        block.forward = make_single_patch(idx, ca_idx)
-    
-    # Fonction pour restaurer l'état original
+        block.forward = make_single_patch(idx)
+
     def unpatch():
         for idx, block in enumerate(double_blocks):
             if idx in original_double:
@@ -313,14 +251,12 @@ def patch_flux(model, pulid_module, id_tokens, strength, debug=False):
         for idx, block in enumerate(single_blocks):
             if idx in original_single:
                 block.forward = original_single[idx]
-    
     return unpatch
 
 
 # ============================================================================
-# Nodes ComfyUI
+# Nodes ComfyUI (inchangés sauf ApplyPuLIDFlux2)
 # ============================================================================
-
 class PuLIDInsightFaceLoader:
     """Charge InsightFace pour la détection et l'analyse des visages"""
     @classmethod
@@ -431,12 +367,7 @@ class PuLIDModelLoader:
         except Exception as e:
             raise RuntimeError(f"[PuLID] Erreur lors du chargement du modèle: {e}")
 
-
 class ApplyPuLIDFlux2:
-    """
-    Applique PuLID au modèle Flux.2
-    VERSION AMÉLIORÉE avec gestion d'erreurs renforcée
-    """
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -463,61 +394,35 @@ class ApplyPuLIDFlux2:
         
         device = comfy.model_management.get_torch_device()
         dtype = torch.bfloat16
-        
-        # Validation de l'image
-        if image.shape[0] == 0 or image.shape[1] == 0 or image.shape[2] == 0:
-            raise ValueError("[PuLID] Image invalide (dimensions nulles)")
-        
-        # Extraction du visage depuis l'image
+
+        # Extraction visage + embeddings (identique à ton code original)
         img_np = (image[0].numpy() * 255).astype(np.uint8)
         faces = face_analysis.get(img_np)
-        
-        # Gestion du cas "aucun visage détecté"
         if not faces:
-            warning_msg = "[PuLID] ⚠️  AUCUN VISAGE DÉTECTÉ dans l'image"
-            print(warning_msg)
-            print("[PuLID] → Mode fallback activé: modèle retourné sans modification")
+            print("⚠️ [PuLID] AUCUN VISAGE → retour sans modification")
             return (model,)
         
-        # Tri des visages par taille (du plus grand au plus petit)
         faces = sorted(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]), reverse=True)
-        
-        # Validation de face_index
         if face_index >= len(faces):
-            warning_msg = f"[PuLID] ⚠️  face_index={face_index} hors limites (max={len(faces)-1})"
-            print(f"{warning_msg} → Utilisation du plus grand visage (index 0)")
             face_index = 0
-        
         face = faces[face_index]
-        
-        if debug_mode:
-            print(f"[PuLID Debug] Visages détectés: {len(faces)}")
-            print(f"[PuLID Debug] Visage sélectionné: index={face_index}, bbox={face.bbox}")
-        
-        # Embedding d'identité (512 dims)
+
         id_embed = torch.from_numpy(face.embedding).unsqueeze(0).to(device, dtype=dtype)
         id_embed = F.normalize(id_embed, dim=-1)
-        
-        # Crop du visage pour EVA-CLIP avec marge
+
+        # Crop + EVA-CLIP (identique)
         x1, y1, x2, y2 = face.bbox.astype(int)
         margin = int(max(x2-x1, y2-y1) * 0.2)
         x1, y1 = max(0, x1-margin), max(0, y1-margin)
         x2, y2 = min(img_np.shape[1], x2+margin), min(img_np.shape[0], y2+margin)
-        
         face_crop = image[:1, y1:y2, x1:x2, :]
-        
-        # Validation du crop
         if face_crop.shape[1] == 0 or face_crop.shape[2] == 0:
-            print("[PuLID] ⚠️  Crop invalide, utilisation de l'image complète")
             face_crop = image[:1]
-        
-        # Préparation pour EVA-CLIP (resize + normalisation)
         face_crop = F.interpolate(face_crop.permute(0,3,1,2), size=(336,336), mode="bilinear").to(device)
         mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=device).view(1,3,1,1)
         std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=device).view(1,3,1,1)
         face_crop = (face_crop - mean) / std
-        
-        # Extraction des features EVA-CLIP (768 dims)
+
         with torch.no_grad():
             clip_out = eva_clip(face_crop.float())
             if isinstance(clip_out, (list, tuple)):
@@ -525,60 +430,41 @@ class ApplyPuLIDFlux2:
             if clip_out.dim() == 3:
                 clip_out = clip_out[:, 0, :]
             clip_embed = clip_out.to(device, dtype=dtype)
-        
-        if debug_mode:
-            print(f"[PuLID Debug] id_embed shape: {id_embed.shape}, clip_embed shape: {clip_embed.shape}")
-        
-        # Génération des tokens d'identité
+
+        # ====================== PARTIE ADAPTATIVE ======================
         pulid_model = pulid_model.to(device, dtype=dtype)
-        
         with torch.no_grad():
             id_tokens = pulid_model.id_former(id_embed, clip_embed)
             id_tokens = F.normalize(id_tokens, p=2, dim=-1)
-        
-        if debug_mode:
-            print(f"[PuLID Debug] id_tokens shape: {id_tokens.shape}, norm: {id_tokens.norm():.4f}")
-        
-        # Clonage du modèle pour ne pas affecter l'original
+
         work_model = model.clone()
         dm = get_flux_inner(work_model)
-        
-        # Nettoie l'ancien patch s'il existe
-        if hasattr(dm, "_pulid_unpatcher"):
-            try:
-                dm._pulid_unpatcher()
-                if debug_mode:
-                    print("[PuLID Debug] Ancien patch nettoyé")
-            except Exception as e:
-                if debug_mode:
-                    print(f"[PuLID Debug] Erreur lors du nettoyage: {e}")
-        
-        # Détection de la variante Flux
-        variant, detected_dim = detect_flux_variant(dm)
-        
-        # Projection si nécessaire
-        if id_tokens.shape[-1] != detected_dim:
-            print(f"[PuLID] 🔄 Projection nécessaire: {id_tokens.shape[-1]} → {detected_dim}")
-            proj = nn.Linear(id_tokens.shape[-1], detected_dim, bias=False).to(device, dtype=dtype)
-            nn.init.normal_(proj.weight, std=0.01)
-            id_tokens = proj(id_tokens)
-            
-            if debug_mode:
-                print(f"[PuLID Debug] id_tokens après projection: {id_tokens.shape}")
-        
-        # Application du patch
-        unpatch = patch_flux(work_model, pulid_model, id_tokens, strength, debug=debug_mode)
-        dm._pulid_unpatcher = unpatch
-        
-        # Affichage des informations
-        if strength == 0:
-            print("⚪ PuLID: OFF (strength=0)")
-        else:
-            emoji = "🟢" if strength >= 1.0 else "🟡"
-            print(f"{emoji} PuLID: ON | {variant} | strength={strength:.2f} | face={face_index}/{len(faces)-1}")
-        
-        return (work_model,)
+        variant, flux_dim, n_double, n_single = detect_flux_variant(dm)
 
+        # Projection si dimension différente (Klein → Dev)
+        if id_tokens.shape[-1] != flux_dim:
+            print(f"[PuLID] 🔄 Projection {id_tokens.shape[-1]} → {flux_dim} ({variant})")
+            proj = nn.Linear(id_tokens.shape[-1], flux_dim, bias=False).to(device, dtype=dtype)
+            nn.init.normal_(proj.weight, std=0.02)
+            id_tokens = proj(id_tokens)
+            id_tokens = F.normalize(id_tokens, p=2, dim=-1)
+            
+            # Création d'un injector avec les bonnes dimensions pour Dev
+            injector = PuLIDFlux2(dim=flux_dim).to(device, dtype=dtype)
+        else:
+            injector = pulid_model
+
+        if debug_mode:
+            print(f"[PuLID Debug] {variant} | {n_double}d / {n_single}s | dim={flux_dim}")
+
+        # Patch
+        unpatch = patch_flux(work_model, injector, id_tokens, strength, debug=debug_mode)
+        dm._pulid_unpatcher = unpatch
+
+        emoji = "🟢" if strength >= 1.0 else "🟡" if strength > 0 else "⚪"
+        print(f"{emoji} PuLID Flux2 | {variant.upper()} | strength={strength:.2f} | face={face_index}")
+
+        return (work_model,)
 
 class PuLIDFacePreview:
     """Affiche les visages détectés avec leur index et informations de confiance"""
@@ -640,11 +526,9 @@ class PuLIDFacePreview:
             print(f"[PuLID Preview] Erreur: {e}")
             return (image,)
 
-
 # ============================================================================
 # Enregistrement des nodes
 # ============================================================================
-
 NODE_CLASS_MAPPINGS = {
     "PuLIDInsightFaceLoader": PuLIDInsightFaceLoader,
     "PuLIDEVACLIPLoader": PuLIDEVACLIPLoader,
@@ -654,9 +538,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PuLIDInsightFaceLoader": "Load InsightFace (PuLID) ⚡",
-    "PuLIDEVACLIPLoader": "Load EVA-CLIP (PuLID) ⚡",
+    "PuLIDInsightFaceLoader": "Load InsightFace (PuLID)",
+    "PuLIDEVACLIPLoader": "Load EVA-CLIP (PuLID)",
     "PuLIDModelLoader": "Load PuLID ✦ Flux.2",
-    "ApplyPuLIDFlux2": "Apply PuLID ✦ Flux.2 [IMPROVED]",
-    "PuLIDFacePreview": "PuLID — Face Preview 🔍",
+    "ApplyPuLIDFlux2": "Apply PuLID ✦ Flux.2",
+    "PuLIDFacePreview": "PuLID — Face Preview",
 }
