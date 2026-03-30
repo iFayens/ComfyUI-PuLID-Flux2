@@ -457,10 +457,10 @@ class ApplyPuLIDFlux2:
         if debug_mode:
             print(f"[PuLID Debug] {variant} | {n_double}d / {n_single}s | dim={flux_dim}")
 
-        # Patch via wrapper : appliqué juste avant chaque appel au sampler, retiré après.
-        # Contrairement au patching direct sur le module PyTorch partagé, cette approche
-        # garantit que le bypass fonctionne correctement : un node bypassé ne produit pas
-        # work_model, donc aucun wrapper n'est enregistré et aucun patch n'est appliqué.
+        # Patch via wrapper: applied just before each sampler call, removed after.
+        # Unlike direct patching on the shared PyTorch module, this approach
+        # ensures bypass works correctly: a bypassed node produces no work_model,
+        # so no wrapper is registered and no patch is applied.
         original_wrapper = work_model.model_options.get("model_function_wrapper", None)
         captured = {"injector": injector, "id_tokens": id_tokens, "strength": strength, "debug": debug_mode}
 
