@@ -439,6 +439,21 @@ class ApplyPuLIDFlux2:
 
         work_model = model.clone()
         dm = get_flux_inner(work_model)
+
+        # Undo any previous monkey-patch before applying a new one.
+        # patch_flux overwrites block.forward on layer instances that are
+        # shared across runs (model.clone() does not deep-copy them).
+        # Without this cleanup the PuLID corrections stack exponentially
+        # and after 3-4 generations the residual stream degenerates
+        # (banding, ghost face, eventually background only).
+        # Fixes #17.
+        if hasattr(dm, "_pulid_unpatcher"):
+            try:
+                dm._pulid_unpatcher()
+            except Exception as _e:
+                print(f"[PuLID] unpatch warning: {_e}")
+            delattr(dm, "_pulid_unpatcher")
+                  
         variant, flux_dim, n_double, n_single = detect_flux_variant(dm)
 
         # Projection si dimension différente (Klein → Dev)
