@@ -457,9 +457,29 @@ class ApplyPuLIDFlux2:
         if debug_mode:
             print(f"[PuLID Debug] {variant} | {n_double}d / {n_single}s | dim={flux_dim}")
 
-        # Patch
-        unpatch = patch_flux(work_model, injector, id_tokens, strength, debug=debug_mode)
-        dm._pulid_unpatcher = unpatch
+        # Patch via wrapper: applied just before each sampler call, removed after.
+        # Unlike direct patching on the shared PyTorch module, this approach
+        # ensures bypass works correctly: a bypassed node produces no work_model,
+        # so no wrapper is registered and no patch is applied.
+        original_wrapper = work_model.model_options.get("model_function_wrapper", None)
+        captured = {"injector": injector, "id_tokens": id_tokens, "strength": strength, "debug": debug_mode}
+
+        def pulid_wrapper(model_function, kwargs):
+            unpatch = patch_flux(
+                get_flux_inner(work_model.model),
+                captured["injector"],
+                captured["id_tokens"],
+                captured["strength"],
+                debug=captured["debug"]
+            )
+            try:
+                if original_wrapper is not None:
+                    return original_wrapper(model_function, kwargs)
+                return model_function(kwargs["input"], kwargs["timestep"], **kwargs["c"])
+            finally:
+                unpatch()
+
+        work_model.set_model_unet_function_wrapper(pulid_wrapper)
 
         emoji = "🟢" if strength >= 1.0 else "🟡" if strength > 0 else "⚪"
         print(f"{emoji} PuLID Flux2 | {variant.upper()} | strength={strength:.2f} | face={face_index}")
